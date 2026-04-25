@@ -243,7 +243,11 @@ async def discover_public_groups(
         try:
             found = await client(functions.contacts.SearchRequest(q=query, limit=limit_per_keyword))
         except FloodWaitError as exc:
-            log.warning("Flood wait while discovering groups: %s seconds. Stopping this discovery cycle.", exc.seconds)
+            seconds = int(getattr(exc, "seconds", 0) or 0)
+            until = datetime.now(timezone.utc) + timedelta(seconds=seconds)
+            db.set_setting("discovery_blocked_until", until.isoformat())
+            db.set_setting("last_flood_wait_seconds", seconds)
+            log.warning("Flood wait while discovering groups: %s seconds. Stopping this discovery cycle.", seconds)
             # Do not continue with other keywords. Continuing would only hit the same Telegram limit again.
             # The next attempt will happen after DISCOVERY_INTERVAL_HOURS / AUTO_DISCOVERY_INTERVAL_MINUTES.
             return added_or_updated
