@@ -844,6 +844,14 @@ async def periodic_scan() -> None:
 
 
 async def periodic_discovery() -> None:
+    if settings.auto_discovery_enabled and settings.discovery_start_delay_hours > 0:
+        delay_seconds = int(settings.discovery_start_delay_hours * 3600)
+        log.warning(
+            "Auto group discovery is enabled but delayed for %.2f hours (%s seconds)",
+            settings.discovery_start_delay_hours, delay_seconds,
+        )
+        await asyncio.sleep(delay_seconds)
+
     while True:
         if not settings.auto_discovery_enabled:
             await asyncio.sleep(settings.discovery_interval_hours * 3600)
