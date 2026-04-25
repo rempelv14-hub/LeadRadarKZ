@@ -17,7 +17,7 @@ from telethon.sessions import StringSession
 
 from leadkz.config import settings
 from leadkz.database import Database
-from leadkz.discovery import discover_public_groups, discover_similar_groups
+from leadkz.discovery import discover_public_groups, discover_similar_groups, scan_existing_dialog_groups
 from leadkz.export import backup_database, export_leads_csv, export_leads_xlsx, export_settings_json
 from leadkz.formatting import (
     anti_ban_text,
@@ -820,6 +820,34 @@ async def cb_reminders(query: CallbackQuery) -> None:
     await query.answer()
 
 
+
+async def run_existing_dialog_group_scan(reason: str = "manual") -> int:
+    """Ищет валидные группы среди чатов, где аккаунт уже состоит.
+    Работает без Telegram Search и без AUTO_DISCOVERY_ENABLED.
+    """
+    try:
+        count = await scan_existing_dialog_groups(
+            tg_client, db,
+            geo_keywords=settings.geo_keywords,
+            geo_required=current_geo_required(),
+            history_limit=settings.scan_my_groups_history_limit,
+            min_valid_score=settings.auto_discovery_min_group_score,
+            max_groups=settings.scan_my_groups_limit,
+            auto_hide_bad=False,
+        )
+        log.info("Existing dialog group scan completed reason=%s valid=%s", reason, count)
+        return count
+    except Exception as exc:
+        db.log_error("scan_existing_dialog_groups", f"{type(exc).__name__}: {exc}")
+        log.exception("Existing dialog group scan failed")
+        return 0
+
+
+async def periodic_existing_dialog_group_scan() -> None:
+    while True:
+        await asyncio.sleep(max(1, int(settings.scan_my_groups_interval_hours * 3600)))
+        await run_existing_dialog_group_scan(reason="periodic")
+
 async def periodic_scan() -> None:
     while True:
         try:
@@ -1001,11 +1029,14 @@ async def main() -> None:
     init_runtime_defaults()
     await start_telethon()
     try:
-        await bot.send_message(settings.admin_id, "✅ LeadKZ Free v8.1.1 запущен. Нажми /start для меню.")
+        await bot.send_message(settings.admin_id, "✅ LeadKZ Free v8.4 запущен. Нажми /start для меню.")
     except Exception as exc:
         # Важно: Railway не должен падать, если ADMIN_ID неверный или пользователь ещё не нажал /start.
         db.log_error("startup_notify", f"{type(exc).__name__}: {exc}")
         log.warning("Startup notification was not delivered. Check ADMIN_ID and press /start in the bot. Error: %s", exc)
+    if settings.scan_my_groups_on_start:
+        asyncio.create_task(run_existing_dialog_group_scan(reason="startup"))
+        asyncio.create_task(periodic_existing_dialog_group_scan())
     if settings.health_server_enabled:
         asyncio.create_task(start_health_server())
     asyncio.create_task(periodic_scan())
