@@ -31,6 +31,9 @@ from leadkz.formatting import (
     format_settings,
     format_stats,
     format_upcoming_reminders,
+    format_exact_scan_result,
+    format_limits_status,
+    format_exact_mode_settings,
     format_priority_queue,
     format_segment_leads,
     format_learning,
@@ -41,7 +44,7 @@ from leadkz.formatting import (
     format_daily_plan,
     since_hours,
 )
-from leadkz.keyboards import groups_actions, lead_actions, main_menu, niches_actions, settings_actions, wizard_actions
+from leadkz.keyboards import groups_actions, hidden_actions, lead_actions, main_menu, niches_actions, settings_actions, wizard_actions
 from leadkz.monitor import register_new_message_handler, scan_recent_messages, scan_valid_public_groups
 from leadkz.pdf_tools import create_offer_pdf
 from leadkz.replies import render_template, templates_menu_text
@@ -89,6 +92,9 @@ def init_runtime_defaults() -> None:
         "max_notifications_per_hour": settings.max_notifications_per_hour,
         "web_dashboard": settings.web_dashboard_enabled,
         "cleanup_enabled": settings.cleanup_enabled,
+        "save_hidden_messages": True,
+        "exact_leads_mode": True,
+        "chatbot_only_mode": False,
     }
     for key, value in defaults.items():
         if db.get_setting(key) is None:
@@ -97,6 +103,28 @@ def init_runtime_defaults() -> None:
 
 def current_geo_required() -> bool:
     return db.get_setting_bool("geo_only", settings.geo_only_kazakhstan)
+
+
+def discovery_blocked_until_dt() -> datetime | None:
+    raw = db.get_setting("discovery_blocked_until")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def discovery_is_blocked() -> tuple[bool, str | None]:
+    dt = discovery_blocked_until_dt()
+    if not dt:
+        return False, None
+    if dt <= datetime.now(timezone.utc):
+        return False, dt.isoformat()
+    return True, dt.isoformat()
 
 
 async def ensure_admin(message_or_query) -> bool:
@@ -341,9 +369,58 @@ async def cb_leads(query: CallbackQuery) -> None:
     await query.answer()
 
 
+@dp.callback_query(F.data.startswith("scan:exact:"))
+async def cb_exact_scan(query: CallbackQuery) -> None:
+    if not await ensure_admin(query):
+        return
+    hours = int(query.data.rsplit(":", 1)[1])
+    try:
+        await query.answer("Проверяю текущие группы…")
+    except Exception:
+        pass
+    per_group_limit = 90 if hours == 1 else 250
+    saved = await scan_recent_messages(
+        client=tg_client, db=db, bot=bot, admin_id=settings.admin_id,
+        min_score=db.get_setting_int("min_score", settings.min_lead_score),
+        max_age_hours=hours,
+        monitored_chat_ids=settings.monitored_chat_ids,
+        geo_keywords=settings.geo_keywords,
+        geo_required=current_geo_required(),
+        per_group_limit=per_group_limit,
+    )
+    await query.message.answer(format_exact_scan_result(hours, saved), reply_markup=main_menu(), disable_web_page_preview=True)
+
+
+@dp.callback_query(F.data == "limits:show")
+async def cb_limits_show(query: CallbackQuery) -> None:
+    if not await ensure_admin(query):
+        return
+    await query.message.edit_text(format_limits_status(db.get_setting("discovery_blocked_until")), reply_markup=main_menu(), disable_web_page_preview=True)
+    await query.answer()
+
+
+@dp.callback_query(F.data == "groups:auto_disable")
+async def cb_auto_disable_groups(query: CallbackQuery) -> None:
+    if not await ensure_admin(query):
+        return
+    count = db.auto_disable_bad_groups(days=7, min_group_score=db.get_setting_int("auto_disable_group_score", 45))
+    await query.message.edit_text(
+        f"🧹 <b>Слабые группы отключены</b>\n\nСкрыто групп: <b>{count}</b>.\n\n"
+        "Логика: группа не дала лидов за 7 дней и имеет низкий рейтинг.",
+        reply_markup=main_menu(),
+        disable_web_page_preview=True,
+    )
+    await query.answer("Готово")
+
+
 @dp.callback_query(F.data == "discover:run")
 async def cb_discover_run(query: CallbackQuery) -> None:
     if not await ensure_admin(query):
+        return
+    blocked, blocked_until = discovery_is_blocked()
+    if blocked:
+        await query.message.edit_text(format_limits_status(blocked_until), reply_markup=main_menu(), disable_web_page_preview=True)
+        await query.answer("Telegram временно ограничил поиск групп", show_alert=True)
         return
     await query.answer("Ищу публичные группы по Казахстану…")
     added = await discover_public_groups(
@@ -362,6 +439,11 @@ async def cb_discover_run(query: CallbackQuery) -> None:
 @dp.callback_query(F.data == "discover:similar")
 async def cb_discover_similar(query: CallbackQuery) -> None:
     if not await ensure_admin(query):
+        return
+    blocked, blocked_until = discovery_is_blocked()
+    if blocked:
+        await query.message.edit_text(format_limits_status(blocked_until), reply_markup=main_menu(), disable_web_page_preview=True)
+        await query.answer("Telegram временно ограничил поиск групп", show_alert=True)
         return
     await query.answer("Ищу похожие группы…")
     added = await discover_similar_groups(
@@ -456,6 +538,19 @@ async def cb_lead_template(query: CallbackQuery) -> None:
     lead = db.get_lead(int(chat_id), int(message_id))
     await query.message.answer(render_template(lead, key), disable_web_page_preview=True)
     await query.answer("Готово")
+
+
+@dp.callback_query(F.data.startswith("lead:smart_reply:"))
+async def cb_lead_smart_reply(query: CallbackQuery) -> None:
+    if not await ensure_admin(query):
+        return
+    _, _, chat_id, message_id = query.data.split(":", 3)
+    lead = db.get_lead(int(chat_id), int(message_id))
+    if not lead:
+        await query.answer("Лид не найден", show_alert=True)
+        return
+    await query.message.answer(format_smart_reply(lead), disable_web_page_preview=True)
+    await query.answer("Ответ готов")
 
 
 @dp.callback_query(F.data.startswith("lead:pdf:"))
@@ -754,6 +849,12 @@ async def cb_settings(query: CallbackQuery) -> None:
         db.set_setting("working_hours", not db.get_setting_bool("working_hours", True)); await query.answer("Рабочее время переключено")
     elif action == "toggle_valid_groups":
         db.set_setting("only_valid_groups", not db.get_setting_bool("only_valid_groups", True)); await query.answer("Фильтр валидных групп переключён")
+    elif action == "toggle_exact":
+        db.set_setting("exact_leads_mode", not db.get_setting_bool("exact_leads_mode", True)); await query.answer("Точный режим переключён")
+        await query.message.edit_text(format_exact_mode_settings(db.get_all_settings()), reply_markup=main_menu(), disable_web_page_preview=True); return
+    elif action == "toggle_chatbot_only":
+        db.set_setting("chatbot_only_mode", not db.get_setting_bool("chatbot_only_mode", False)); await query.answer("Режим чат-ботов переключён")
+        await query.message.edit_text(format_exact_mode_settings(db.get_all_settings()), reply_markup=main_menu(), disable_web_page_preview=True); return
     elif action == "score_up":
         db.set_setting("min_score", min(95, db.get_setting_int("min_score", settings.min_lead_score) + 5)); await query.answer("Минимальный балл повышен")
     elif action == "score_down":
