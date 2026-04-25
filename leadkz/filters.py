@@ -208,6 +208,28 @@ HOT_PHRASES = [
     "в ближайшее время", "на этой неделе", "дедлайн",
 ]
 
+
+# Явные заявки. Это самый строгий слой:
+# сообщение должно быть не просто про услугу, а с явным запросом "нужен/ищу/кто сделает/сколько стоит".
+EXACT_REQUEST_PHRASES = [
+    "нужен", "нужна", "нужно", "нужны", "надо", "требуется",
+    "ищу исполнителя", "ищу специалиста", "ищу разработчика", "ищу дизайнера",
+    "ищу smm", "ищу смм", "ищу таргетолога", "ищу маркетолога",
+    "кто сделает", "кто может сделать", "кто сможет сделать", "кто возьмется",
+    "кто занимается", "есть кто", "посоветуйте", "подскажите", "порекомендуйте",
+    "нужна помощь", "есть задача", "хочу заказать", "сколько стоит", "какая цена",
+    "готов оплатить", "есть бюджет", "керек", "іздеймін", "кім жасап береді",
+]
+
+EXACT_REQUEST_PATTERNS = [
+    r"\bнуж(ен|на|но|ны)\b.+\b(бот|чат.?бот|telegram|телеграм|crm|црм|автоматизац|сайт|лендинг|smm|смм|таргет|реклам|дизайн|логотип|заявк|запис|kaspi|каспи)\b",
+    r"\bищу\b.+\b(исполнител|специалист|разработчик|дизайнер|smm|смм|таргетолог|маркетолог|человек|команд)\b",
+    r"\bкто\b.+\b(сделает|может|сможет|возьмется|занимается|умеет)\b",
+    r"\b(подскажите|посоветуйте|порекомендуйте)\b.+\b(кого|кто|специалист|разработчик|дизайнер|smm|смм|таргетолог)\b",
+    r"\bсколько\b.+\b(стоит|будет стоить)\b",
+    r"\bкім\b.+\b(жасап|істеп).*(беред|алады)\b",
+]
+
 QUESTION_PATTERNS = [
     r"кто\s+(может|сможет|умеет|делает|возьмется)",
     r"есть\s+кто",
@@ -388,6 +410,7 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     buyer_only_mode = os.getenv("BUYER_ONLY_MODE", "true").lower() in {"1", "true", "yes", "on"}
     reject_sellers = os.getenv("REJECT_SELLERS", "true").lower() in {"1", "true", "yes", "on"}
     require_buyer_intent = os.getenv("REQUIRE_BUYER_INTENT", "true").lower() in {"1", "true", "yes", "on"}
+    exact_leads_mode = os.getenv("EXACT_LEADS_MODE", "true").lower() in {"1", "true", "yes", "on"}
 
     seller_hits = _contains_any(cleaned, SELLER_INTENT_PHRASES)
     developer_hits = _contains_any(cleaned, DEVELOPER_PHRASES)
@@ -407,6 +430,8 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     # Боль засчитываем только если это похоже на личный запрос/вопрос, а не на рекламный пост исполнителя.
     problem_hits = raw_problem_hits if raw_problem_hits and (self_need_hits or question_intent_for_problem) and not problem_seller_context_hits else []
 
+    exact_request_hits = _contains_any(cleaned, EXACT_REQUEST_PHRASES)
+    exact_pattern_hits = [p for p in EXACT_REQUEST_PATTERNS if re.search(p, cleaned)]
     has_question_intent_early = any(re.search(p, cleaned) for p in QUESTION_PATTERNS)
     has_strict_buyer_intent = bool(strict_buyer_hits or buyer_hits or problem_hits or has_question_intent_early)
     has_strict_solution_context = bool(strict_solution_hits or solution_hits or problem_hits)
@@ -415,6 +440,13 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
         return LeadScore(
             False, 0, "seller_rejected", 0,
             [f"скрыто: это похоже на исполнителя/рекламу услуг: {', '.join(all_seller_hits[:4])}"],
+            lead_hash
+        )
+
+    if buyer_only_mode and exact_leads_mode and not (exact_request_hits or exact_pattern_hits):
+        return LeadScore(
+            False, 0, "not_exact_request", 0,
+            ["скрыто: это не явная заявка. Нужны сигналы: «нужен», «ищу», «кто сделает», «сколько стоит», «посоветуйте»."],
             lead_hash
         )
 
@@ -432,6 +464,9 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
             lead_hash
         )
 
+    if exact_request_hits or exact_pattern_hits:
+        score += 20
+        reasons.append("явная заявка: есть намерение найти исполнителя/заказать")
     if strict_buyer_hits:
         score += 35 + min(len(strict_buyer_hits), 4) * 8
         reasons.append(f"намерение заказчика: {', '.join(strict_buyer_hits[:4])}")
