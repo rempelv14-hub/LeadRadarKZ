@@ -10,8 +10,12 @@ from .replies import template_key_for_category
 def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🔥 Лиды за час", callback_data="leads:1"), InlineKeyboardButton(text="📅 За 24 часа", callback_data="leads:24")],
+        [InlineKeyboardButton(text="⚡ Проверить 1ч", callback_data="scan:exact:1"), InlineKeyboardButton(text="🔎 Проверить 24ч", callback_data="scan:exact:24")],
         [InlineKeyboardButton(text="⭐ Избранные", callback_data="leads:favorites"), InlineKeyboardButton(text="🗂 Архив", callback_data="leads:archived")],
+        [InlineKeyboardButton(text="🚫 Скрытые", callback_data="hidden:list"), InlineKeyboardButton(text="💸 Цены услуг", callback_data="prices:list")],
         [InlineKeyboardButton(text="📊 Статистика", callback_data="stats:24"), InlineKeyboardButton(text="🎯 Кому писать", callback_data="priority:queue")],
+        [InlineKeyboardButton(text="🎯 Только явные", callback_data="settings:toggle_exact"), InlineKeyboardButton(text="🤖 Только боты", callback_data="settings:toggle_chatbot_only")],
+        [InlineKeyboardButton(text="🛡 Лимиты TG", callback_data="limits:show"), InlineKeyboardButton(text="🧹 Слабые группы", callback_data="groups:auto_disable")],
         [InlineKeyboardButton(text="✅ /check", callback_data="check:run"), InlineKeyboardButton(text="🛠 Диагностика", callback_data="diagnostics:show")],
         [InlineKeyboardButton(text="🧩 Мастер", callback_data="setup:wizard"), InlineKeyboardButton(text="🌐 Web-панель", callback_data="web:info")],
         [InlineKeyboardButton(text="📈 Воронка", callback_data="sales:funnel"), InlineKeyboardButton(text="💰 Доход", callback_data="sales:revenue")],
@@ -49,6 +53,7 @@ def lead_actions(chat_id: int, message_id: int, link: str | None, category: str 
     buttons.append([
         InlineKeyboardButton(text="⭐ В избранное", callback_data=f"lead:status:favorite:{chat_id}:{message_id}"),
         InlineKeyboardButton(text="💬 Шаблон", callback_data=f"lead:template:{template_key_for_category(category)}:{chat_id}:{message_id}"),
+        InlineKeyboardButton(text="🧠 Ответ", callback_data=f"lead:smart_reply:{chat_id}:{message_id}"),
     ])
     buttons.append([
         InlineKeyboardButton(text="❓ Вопросы", callback_data=f"lead:template:questions:{chat_id}:{message_id}"),
@@ -128,3 +133,14 @@ def wizard_actions() -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="➕ Балл", callback_data="settings:score_up")],
         [InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")],
     ])
+
+
+def hidden_actions(rows) -> InlineKeyboardMarkup:
+    buttons: list[list[InlineKeyboardButton]] = []
+    for i, row in enumerate(rows[:8], start=1):
+        buttons.append([
+            InlineKeyboardButton(text=f"✅ Это лид {i}", callback_data=f"hidden:restore:{row.chat_id}:{row.message_id}"),
+            InlineKeyboardButton(text=f"🗑 Удалить {i}", callback_data=f"hidden:delete:{row.chat_id}:{row.message_id}"),
+        ])
+    buttons.append([InlineKeyboardButton(text="⬅️ Меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
