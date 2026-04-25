@@ -217,10 +217,9 @@ def register_new_message_handler(*, client: TelegramClient, db: Database, bot: B
         try:
             chat = await event.get_chat()
             message = event.message
-            try:
-                message.sender = await event.get_sender()
-            except Exception:
-                message.sender = None
+            # Telethon Message.sender is a read-only property.
+            # Не присваиваем message.sender, иначе Railway падает с:
+            # AttributeError: property 'sender' of 'Message' object has no setter
             await save_and_notify_if_lead(db=db, bot=bot, admin_id=admin_id, chat=chat, message=message,
                                           min_score=min_score, max_age_hours=max_age_hours,
                                           monitored_chat_ids=monitored_chat_ids, geo_keywords=geo_keywords,
