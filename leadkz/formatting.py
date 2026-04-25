@@ -340,3 +340,126 @@ def format_lead_advice(lead: Lead) -> str:
 
 def format_daily_plan(stats: dict[str, object]) -> str:
     return daily_plan_text(stats)
+
+
+def format_hidden_messages(rows) -> str:
+    if not rows:
+        return "🚫 <b>Скрытые сообщения</b>\n\nПока скрытых сообщений нет."
+    parts = ["🚫 <b>Скрытые сообщения</b>\n\nЗдесь видно, что бот отсеял и почему. Если бот ошибся — нажми «✅ Это лид»."]
+    for i, row in enumerate(rows, start=1):
+        text = html.escape(" ".join(str(row.text).split())[:450])
+        reasons = html.escape(str(row.reasons)[:300])
+        title = html.escape(str(row.chat_title))
+        parts.append(
+            f"\n<b>{i}. {title}</b>\n"
+            f"Оценка: <b>{row.score}/100</b> | Категория: <code>{html.escape(str(row.category))}</code>\n"
+            f"Текст: {text}\n"
+            f"Причина: <i>{reasons}</i>"
+        )
+    return "\n".join(parts)
+
+
+def format_smart_reply(lead) -> str:
+    text = (lead.text or "").lower()
+    title = "вашей задаче"
+    if any(w in text for w in ["курс", "школ", "урок", "обуч", "марафон"]):
+        title = "онлайн-школе/курсам"
+        offer = "запись учеников, оплату через Kaspi, выдачу материалов и уведомления"
+    elif any(w in text for w in ["запись", "салон", "клиник", "мастер"]):
+        title = "записи клиентов"
+        offer = "выбор услуги, свободное время, уведомления администратору и напоминания клиентам"
+    elif any(w in text for w in ["crm", "црм", "заявк", "воронк", "автоматизац"]):
+        title = "автоматизации заявок"
+        offer = "сбор заявок, CRM-воронку, уведомления менеджеру и таблицу/базу клиентов"
+    elif any(w in text for w in ["сайт", "лендинг", "магазин"]):
+        title = "сайту/лендингу"
+        offer = "структуру, форму заявок, кнопки WhatsApp/Telegram и аналитику"
+    elif any(w in text for w in ["smm", "смм", "реклам", "таргет"]):
+        title = "продвижению"
+        offer = "упаковку, контент, рекламную связку и обработку заявок"
+    elif any(w in text for w in ["дизайн", "логотип", "баннер", "презентац"]):
+        title = "дизайну"
+        offer = "визуал, макеты, баннеры и оформление под вашу задачу"
+    else:
+        offer = "заявки, уведомления, базу клиентов и удобную обработку обращений"
+
+    return (
+        "💬 <b>Ответ под конкретный лид</b>\n\n"
+        f"Здравствуйте! Увидел, что вам нужна помощь по {html.escape(title)}.\n"
+        f"Могу помочь: {html.escape(offer)}.\n\n"
+        "Чтобы точнее сориентировать по цене и срокам, подскажите, пожалуйста:\n"
+        "1) для какого бизнеса это нужно?\n"
+        "2) какие функции обязательны?\n"
+        "3) есть ли пример, как должно работать?"
+    )
+
+
+def format_price_settings() -> str:
+    return (
+        "💰 <b>Базовые цены для расчёта</b>\n\n"
+        "🤖 Простой бот: <b>от 50 000 ₸</b>\n"
+        "💳 Бот с Kaspi/оплатой: <b>от 120 000 ₸</b>\n"
+        "📦 CRM / автоматизация: <b>от 180 000 ₸</b>\n"
+        "🌐 Сайт / лендинг: <b>от 100 000 ₸</b>\n"
+        "📱 SMM / реклама: <b>от 80 000 ₸</b>\n"
+        "🎨 Дизайн: <b>от 30 000 ₸</b>\n\n"
+        "Для изменения цен пока используй текст в ответе/КП. Позже можно вынести редактирование цен в кнопки."
+    )
+
+
+def format_exact_scan_result(hours: int, saved_count: int) -> str:
+    title = "⚡ <b>Проверка заявок за 1 час</b>" if hours == 1 else "🔎 <b>Проверка заявок за 24 часа</b>"
+    return (
+        f"{title}\n\n"
+        f"Готово. Новых подходящих заявок сохранено: <b>{saved_count}</b>.\n\n"
+        "Бот проверил текущие группы, где аккаунт уже состоит, и применил строгий фильтр:\n"
+        "— только явные заявки;\n"
+        "— только заказчики;\n"
+        "— исполнители и реклама скрываются."
+    )
+
+
+def format_limits_status(blocked_until: str | None) -> str:
+    if not blocked_until:
+        return (
+            "🛡 <b>Лимиты Telegram</b>\n\n"
+            "Сейчас сохранённого Flood Wait нет.\n"
+            "Можно сканировать текущие группы 24/7.\n\n"
+            "Поиск новых публичных групп лучше запускать редко: 1–2 раза в день."
+        )
+    try:
+        dt = datetime.fromisoformat(blocked_until)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return "🛡 <b>Лимиты Telegram</b>\n\nНе смог прочитать таймер Flood Wait."
+    now = datetime.now(timezone.utc)
+    if dt <= now:
+        return "🛡 <b>Лимиты Telegram</b>\n\nFlood Wait уже должен быть завершён. Можно пробовать аккуратно."
+    total = int((dt - now).total_seconds())
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    return (
+        "🛡 <b>Лимиты Telegram</b>\n\n"
+        f"Поиск новых публичных групп временно ограничен.\n"
+        f"Осталось примерно: <b>{hours}ч {minutes}м</b>.\n\n"
+        "Что можно делать сейчас:\n"
+        "✅ сканировать текущие группы;\n"
+        "✅ искать заявки за час/24 часа;\n"
+        "✅ работать с CRM и лидами.\n\n"
+        "Что пока не нажимать:\n"
+        "❌ ручной поиск новых публичных групп."
+    )
+
+
+def format_exact_mode_settings(settings_map: dict[str, str]) -> str:
+    exact = settings_map.get("exact_leads_mode", "1") == "1"
+    bots = settings_map.get("chatbot_only_mode", "0") == "1"
+    return (
+        "🎯 <b>Точный режим заявок</b>\n\n"
+        f"Только явные заявки: {'✅ включено' if exact else '❌ выключено'}\n"
+        f"Только чат-бот/автоматизация: {'✅ включено' if bots else '❌ выключено'}\n\n"
+        "В точном режиме бот показывает сообщения только если человек реально ищет исполнителя:\n"
+        "«нужен», «ищу», «кто сделает», «сколько стоит», «посоветуйте».\n\n"
+        "Сообщения «делаю сайты», «ищу клиентов», «мои услуги» скрываются."
+    )
