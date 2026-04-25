@@ -1,0 +1,5 @@
+aiogram>=3.13,<4
+telethon>=1.41,<2
+python-dotenv>=1.0,<2
+openpyxl>=3.1,<4
+fpdf2>=2.7,<3

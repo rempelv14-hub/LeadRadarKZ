@@ -1,0 +1,15 @@
+.env
+*.session
+session_string.txt
+railway_variables.txt
+railway_upload.zip
+leadkz.sqlite3
+leadkz.sqlite3-shm
+leadkz.sqlite3-wal
+exports/
+backups/
+__pycache__/
+*.pyc
+.venv/
+venv/
+.idea/
