@@ -1,316 +1,223 @@
 from __future__ import annotations
 
-import asyncio
-import logging
-import re
+import os
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Iterable
+from pathlib import Path
+from typing import List
 
-from telethon import TelegramClient, functions, types
-from telethon.errors import FloodWaitError, RPCError
+from dotenv import load_dotenv
 
-from .database import Database
-from .filters import (
-    BUYER_PHRASES,
-    BUYER_WORDS,
-    DEVELOPER_PHRASES,
-    SPAM_PHRASES,
-    SOLUTION_CONTEXT_WORDS,
-    geo_score_for_text,
-    normalize_text,
-    score_message,
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR / ".env")
+
+
+def _get_required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _get_int(name: str, default: int | None = None) -> int:
+    value = os.getenv(name, "").strip()
+    if value == "" and default is not None:
+        return default
+    if value == "":
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"Environment variable {name} must be an integer") from exc
+
+
+def _get_float(name: str, default: float | None = None) -> float:
+    value = os.getenv(name, "").strip()
+    if value == "" and default is not None:
+        return default
+    if value == "":
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    try:
+        return float(value.replace(",", "."))
+    except ValueError as exc:
+        raise RuntimeError(f"Environment variable {name} must be a number") from exc
+
+
+def _has_env(name: str) -> bool:
+    return os.getenv(name, "").strip() != ""
+
+
+def _get_alias_int(primary: str, alias: str, default: int) -> int:
+    if _has_env(primary):
+        return _get_int(primary)
+    if _has_env(alias):
+        return _get_int(alias)
+    return default
+
+
+def _get_discovery_interval_hours(default: float = 12.0) -> float:
+    if _has_env("AUTO_DISCOVERY_INTERVAL_MINUTES"):
+        return max(0.1, _get_float("AUTO_DISCOVERY_INTERVAL_MINUTES") / 60.0)
+    return _get_float("DISCOVERY_INTERVAL_HOURS", default)
+
+
+def _get_discovery_start_delay_hours(default: float = 0.0) -> float:
+    if _has_env("AUTO_DISCOVERY_START_DELAY_SECONDS"):
+        return max(0.0, _get_float("AUTO_DISCOVERY_START_DELAY_SECONDS") / 3600.0)
+    if _has_env("AUTO_DISCOVERY_START_DELAY_MINUTES"):
+        return max(0.0, _get_float("AUTO_DISCOVERY_START_DELAY_MINUTES") / 60.0)
+    return max(0.0, _get_float("AUTO_DISCOVERY_START_DELAY_HOURS", default))
+
+
+def _get_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name, "").strip().lower()
+    if value == "":
+        return default
+    return value in {"1", "true", "yes", "y", "да", "on"}
+
+
+def _get_list(name: str, default: str = "") -> List[str]:
+    raw = os.getenv(name, default)
+    return [part.strip() for part in raw.split(",") if part.strip()]
+
+
+def _get_int_list(name: str) -> List[int]:
+    result: List[int] = []
+    for item in _get_list(name):
+        try:
+            result.append(int(item))
+        except ValueError:
+            continue
+    return result
+
+
+DEFAULT_DISCOVERY_KEYWORDS = (
+    "чат бот казахстан,чат-бот казахстан,telegram bot kazakhstan,телеграм бот казахстан,"
+    "бот для бизнеса казахстан,автоматизация бизнеса казахстан,онлайн курсы казахстан,"
+    "школа курсы казахстан,маркетинг казахстан,предприниматели казахстан,бизнес казахстан,"
+    "стартап казахстан,алматы бизнес,астана бизнес,нур-султан бизнес,шымкент бизнес,"
+    "караганда бизнес,актобе бизнес,атырау бизнес,костанай бизнес,павлодар бизнес,"
+    "усть-каменогорск бизнес,семей бизнес,kz бизнес,kaspi бизнес,"
+    "crm казахстан,автоматизация заявок казахстан,онлайн запись казахстан,"
+    "предприниматели алматы,предприниматели астана,малый бизнес казахстан,"
+    "нужен сайт казахстан,создание сайта казахстан,smm казахстан,таргет казахстан,"
+    "дизайн казахстан,логотип казахстан,реклама казахстан,интернет магазин казахстан"
 )
 
-log = logging.getLogger(__name__)
+DEFAULT_GEO_KEYWORDS = (
+    "казахстан,kazakhstan,қазақстан,казакстан,kz,кз,алматы,almaty,астана,astana,"
+    "нур-султан,nur-sultan,шымкент,shymkent,караганда,karaganda,актобе,aktobe,"
+    "атырау,atyrau,актау,aktau,костанай,kostanay,павлодар,pavlodar,семей,semey,"
+    "усть-каменогорск,oskemen,өскемен,кызылорда,kyzylorda,тараз,taraz,"
+    "петропавловск,petropavl,уральск,oral,орал,кокшетау,kokshetau,туркестан,turkestan,"
+    "талдыкорган,taldykorgan,сатпаев,satbayev,жезказган,zhezkazgan,экибастуз,ekibastuz,"
+    "+7,kaspi,каспи,тенге,тг,kzt,ип,тоо"
+)
+
+
+def _data_dir() -> Path:
+    raw = os.getenv("DATA_DIR", "").strip() or os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    path = Path(raw) if raw else BASE_DIR
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+DATA_DIR = _data_dir()
 
 
 @dataclass(frozen=True)
-class GroupEvaluation:
-    score: int
-    validation_status: str
-    reasons: list[str]
-    lead_hits: int
-    spam_hits: int
-    developer_hits: int
-    recent_messages: int
-    total_messages: int
+class Settings:
+    bot_token: str
+    admin_id: int
+    admin_ids: List[int]
+    api_id: int
+    api_hash: str
+    tg_session: str
+    tg_session_string: str | None
+    scan_interval_seconds: int
+    lead_max_age_hours: int
+    hot_lead_age_minutes: int
+    min_lead_score: int
+    discovery_interval_hours: float
+    discovery_start_delay_hours: float
+    discovery_limit_per_keyword: int
+    discovery_keywords: List[str]
+    monitored_chat_ids: List[int]
+    geo_only_kazakhstan: bool
+    geo_keywords: List[str]
+    database_path: Path
+    export_dir: Path
+    daily_report_enabled: bool
+    daily_report_hour: int
+    autobackup_enabled: bool
+    autobackup_hour: int
+    auto_discovery_enabled: bool
+    auto_discovery_min_group_score: int
+    auto_discovery_history_limit: int
+    auto_monitor_valid_groups: bool
+    auto_hide_bad_groups: bool
+    scan_my_groups_on_start: bool
+    scan_my_groups_interval_hours: float
+    scan_my_groups_limit: int
+    scan_my_groups_history_limit: int
+    only_valid_groups: bool
+    health_server_enabled: bool
+    health_port: int
+    max_notifications_per_hour: int
+    weekly_report_enabled: bool
+    weekly_report_day: int
+    cleanup_enabled: bool
+    cleanup_hour: int
+    web_dashboard_enabled: bool
+    brand_name: str
+    brand_phone: str
+    brand_telegram: str
 
 
-def _group_text(chat: object, query: str) -> str:
-    title = getattr(chat, "title", "") or ""
-    username = getattr(chat, "username", "") or ""
-    about = getattr(chat, "about", "") or ""
-    return f"{title} @{username} {about} {query}"
-
-
-def _contains_any(cleaned: str, phrases: Iterable[str]) -> list[str]:
-    return [phrase for phrase in phrases if phrase and phrase.lower().replace("ё", "е") in cleaned]
-
-
-def similar_queries_from_titles(titles: Iterable[str]) -> list[str]:
-    queries: list[str] = []
-    stop = {"чат", "группа", "казахстан", "қазақстан", "kz", "для", "және", "и", "в", "по", "the", "of"}
-    for title in titles:
-        cleaned = re.sub(r"[^a-zA-Zа-яА-Яәғқңөұүіһ0-9\s-]", " ", title.lower())
-        words = [w for w in cleaned.split() if len(w) >= 4 and w not in stop]
-        base = " ".join(words[:3]).strip()
-        if base:
-            queries.extend([base, f"{base} казахстан", f"{base} алматы", f"{base} астана", f"{base} бизнес"])
-    defaults = [
-        "предприниматели казахстан", "бизнес алматы", "стартапы казахстан", "маркетинг казахстан",
-        "онлайн школы казахстан", "kaspi бизнес", "crm казахстан", "автоматизация бизнеса казахстан",
-    ]
-    result: list[str] = []
-    for q in queries + defaults:
-        if q not in result:
-            result.append(q)
-    return result[:25]
-
-
-def _status_from_score(score: int, min_valid_score: int, hide_bad: bool) -> tuple[str, str]:
-    if score >= 88:
-        return "strong", "valid"
-    if score >= min_valid_score:
-        return "valid", "valid"
-    if score >= 50:
-        return "weak", "candidate"
-    return "trash", "hidden" if hide_bad else "candidate"
-
-
-async def evaluate_public_group(
-    client: TelegramClient,
-    chat: object,
-    query: str,
-    geo_keywords: Iterable[str],
-    history_limit: int = 120,
-    min_valid_score: int = 75,
-    geo_required: bool = True,
-) -> GroupEvaluation:
-    """Оценивает группу по названию и доступным последним сообщениям. Не вступает в группу."""
-    title = getattr(chat, "title", "") or ""
-    username = getattr(chat, "username", "") or ""
-    base_text = _group_text(chat, query)
-    geo_score, geo_hits = geo_score_for_text(base_text, geo_keywords)
-
-    score = 0
-    reasons: list[str] = []
-    if geo_score > 0:
-        add = min(30, geo_score)
-        score += add
-        reasons.append(f"KZ-гео в названии/описании: +{add} ({', '.join(geo_hits[:4])})")
-    elif geo_required:
-        reasons.append("нет признаков Казахстана в названии/описании")
-
-    lead_hits = 0
-    spam_hits = 0
-    developer_hits = 0
-    buyer_hits = 0
-    solution_hits = 0
-    question_hits = 0
-    recent_messages = 0
-    total_messages = 0
-    now = datetime.now(timezone.utc)
-    collected_text = []
-
-    try:
-        async for message in client.iter_messages(chat, limit=max(20, history_limit)):
-            text = getattr(message, "message", None) or getattr(message, "text", None) or ""
-            if not text:
-                continue
-            msg_date = getattr(message, "date", None)
-            if isinstance(msg_date, datetime):
-                if msg_date.tzinfo is None:
-                    msg_date = msg_date.replace(tzinfo=timezone.utc)
-                if msg_date >= now - timedelta(hours=24):
-                    recent_messages += 1
-            total_messages += 1
-            cleaned = normalize_text(text)
-            collected_text.append(cleaned[:400])
-
-            if _contains_any(cleaned, SPAM_PHRASES):
-                spam_hits += 1
-            if _contains_any(cleaned, DEVELOPER_PHRASES):
-                developer_hits += 1
-            if _contains_any(cleaned, BUYER_PHRASES) or _contains_any(cleaned, BUYER_WORDS):
-                buyer_hits += 1
-            if _contains_any(cleaned, SOLUTION_CONTEXT_WORDS):
-                solution_hits += 1
-            if "?" in text or "кто" in cleaned or "кім" in cleaned or "посоветуйте" in cleaned or "подскажите" in cleaned:
-                question_hits += 1
-
-            lead_result = score_message(text, min_score=55, geo_keywords=geo_keywords, geo_required=False)
-            if lead_result.is_lead or lead_result.score >= 60:
-                lead_hits += 1
-    except RPCError as exc:
-        raise RuntimeError(f"нет доступа к истории или Telegram ограничил запрос: {type(exc).__name__}") from exc
-    except Exception as exc:
-        raise RuntimeError(f"не удалось прочитать последние сообщения: {type(exc).__name__}") from exc
-
-    if total_messages == 0:
-        score -= 30
-        reasons.append("последние сообщения недоступны или группа пустая: -30")
-    else:
-        if recent_messages >= 20:
-            score += 25
-            reasons.append(f"активная за 24 часа: +25 ({recent_messages} сообщений)")
-        elif recent_messages >= 5:
-            score += 16
-            reasons.append(f"есть активность за 24 часа: +16 ({recent_messages} сообщений)")
-        elif recent_messages >= 1:
-            score += 8
-            reasons.append(f"низкая активность за 24 часа: +8 ({recent_messages} сообщений)")
-        else:
-            score -= 25
-            reasons.append("нет свежих сообщений за 24 часа: -25")
-
-        if lead_hits:
-            add = min(32, lead_hits * 8)
-            score += add
-            reasons.append(f"в истории есть похожие заявки: +{add} ({lead_hits})")
-        if buyer_hits:
-            add = min(20, buyer_hits * 4)
-            score += add
-            reasons.append(f"есть слова заказчиков: +{add} ({buyer_hits})")
-        if solution_hits:
-            add = min(16, solution_hits * 3)
-            score += add
-            reasons.append(f"есть темы боты/CRM/Kaspi/сайты: +{add} ({solution_hits})")
-        if question_hits:
-            add = min(14, question_hits * 2)
-            score += add
-            reasons.append(f"есть вопросы людей: +{add} ({question_hits})")
-
-        spam_penalty = min(45, spam_hits * 8)
-        dev_penalty = min(50, developer_hits * 9)
-        if spam_penalty:
-            score -= spam_penalty
-            reasons.append(f"спам/мусор: -{spam_penalty} ({spam_hits})")
-        if dev_penalty:
-            score -= dev_penalty
-            reasons.append(f"много исполнителей/рекламы услуг: -{dev_penalty} ({developer_hits})")
-
-        spam_ratio = spam_hits / max(total_messages, 1)
-        dev_ratio = developer_hits / max(total_messages, 1)
-        if spam_ratio < 0.08 and dev_ratio < 0.10 and total_messages >= 20:
-            score += 10
-            reasons.append("мало спама и рекламы: +10")
-
-    if geo_required and geo_score <= 0:
-        score = min(score, 49)
-
-    score = max(0, min(100, int(score)))
-    validation_status, _ = _status_from_score(score, min_valid_score, hide_bad=False)
-    if score >= 88:
-        reasons.insert(0, "сильная валидная группа")
-    elif score >= min_valid_score:
-        reasons.insert(0, "валидная группа")
-    elif score >= 50:
-        reasons.insert(0, "средняя группа, лучше проверить")
-    else:
-        reasons.insert(0, "мусорная/слабая группа")
-
-    return GroupEvaluation(
-        score=score,
-        validation_status=validation_status,
-        reasons=reasons[:10],
-        lead_hits=lead_hits,
-        spam_hits=spam_hits,
-        developer_hits=developer_hits,
-        recent_messages=recent_messages,
-        total_messages=total_messages,
-    )
-
-
-async def discover_public_groups(
-    client: TelegramClient,
-    db: Database,
-    keywords: Iterable[str],
-    limit_per_keyword: int = 15,
-    geo_keywords: Iterable[str] | None = None,
-    geo_required: bool = True,
-    history_limit: int = 120,
-    min_valid_score: int = 75,
-    auto_hide_bad: bool = True,
-) -> int:
-    """Ищет публичные группы, оценивает валидность и автодобавляет сильные в мониторинг."""
-    added_or_updated = 0
-    geo_keywords = list(geo_keywords or [])
-    for keyword in keywords:
-        query = keyword.strip()
-        if not query:
-            continue
-        try:
-            found = await client(functions.contacts.SearchRequest(q=query, limit=limit_per_keyword))
-        except FloodWaitError as exc:
-            log.warning("Flood wait while discovering groups: %s seconds. Stopping this discovery cycle.", exc.seconds)
-            # Do not continue with other keywords. Continuing would only hit the same Telegram limit again.
-            # The next attempt will happen after DISCOVERY_INTERVAL_HOURS / AUTO_DISCOVERY_INTERVAL_MINUTES.
-            return added_or_updated
-        except Exception:
-            log.exception("Failed to search public groups for query=%r", query)
-            continue
-
-        for chat in getattr(found, "chats", []):
-            kind = None
-            username = None
-            title = getattr(chat, "title", "Без названия") or "Без названия"
-            if isinstance(chat, types.Channel):
-                if not bool(getattr(chat, "megagroup", False)):
-                    continue
-                kind = "megagroup"
-                username = getattr(chat, "username", None)
-            elif isinstance(chat, types.Chat):
-                kind = "group"
-            else:
-                continue
-
-            base_geo_score, _ = geo_score_for_text(_group_text(chat, query), geo_keywords)
-            if geo_required and base_geo_score <= 0:
-                continue
-
-            chat_id = int(getattr(chat, "id", 0) or 0)
-            db.add_group_candidate(chat_id=chat_id, title=title, username=username, query=query, kind=kind, geo_score=base_geo_score)
-            try:
-                evaluation = await evaluate_public_group(
-                    client, chat, query, geo_keywords=geo_keywords, history_limit=history_limit,
-                    min_valid_score=min_valid_score, geo_required=geo_required,
-                )
-                validation, suggested_status = _status_from_score(evaluation.score, min_valid_score, auto_hide_bad)
-                db.update_group_evaluation(
-                    chat_id=chat_id,
-                    score=evaluation.score,
-                    validation_status=validation,
-                    reasons=evaluation.reasons,
-                    lead_hits=evaluation.lead_hits,
-                    spam_hits=evaluation.spam_hits,
-                    developer_hits=evaluation.developer_hits,
-                    recent_messages=evaluation.recent_messages,
-                    status=suggested_status,
-                )
-                added_or_updated += 1
-            except Exception as exc:
-                db.mark_group_error(chat_id, str(exc))
-                log.info("Group evaluation failed for %s: %s", title, exc)
-        await asyncio.sleep(1.2)
-    return added_or_updated
-
-
-async def discover_similar_groups(
-    client: TelegramClient,
-    db: Database,
-    limit_per_keyword: int,
-    geo_keywords: Iterable[str],
-    geo_required: bool,
-    history_limit: int = 120,
-    min_valid_score: int = 75,
-    auto_hide_bad: bool = True,
-) -> int:
-    titles = db.get_top_group_titles(datetime.now(timezone.utc) - timedelta(days=7), limit=6)
-    titles.extend([g.title for g in db.get_best_auto_groups(limit=6)])
-    queries = similar_queries_from_titles(titles)
-    return await discover_public_groups(
-        client, db, queries, limit_per_keyword=limit_per_keyword, geo_keywords=geo_keywords,
-        geo_required=geo_required, history_limit=history_limit, min_valid_score=min_valid_score,
-        auto_hide_bad=auto_hide_bad,
-    )
+settings = Settings(
+    bot_token=_get_required("BOT_TOKEN"),
+    admin_id=_get_int("ADMIN_ID"),
+    admin_ids=_get_int_list("ADMIN_IDS") or [_get_int("ADMIN_ID")],
+    api_id=_get_int("API_ID"),
+    api_hash=_get_required("API_HASH"),
+    tg_session=os.getenv("TG_SESSION", "leadkz_session").strip() or "leadkz_session",
+    tg_session_string=os.getenv("TG_SESSION_STRING", "").strip() or None,
+    scan_interval_seconds=_get_int("SCAN_INTERVAL_SECONDS", 300),
+    lead_max_age_hours=_get_int("LEAD_MAX_AGE_HOURS", 24),
+    hot_lead_age_minutes=_get_int("HOT_LEAD_AGE_MINUTES", 60),
+    min_lead_score=_get_int("MIN_LEAD_SCORE", 55),
+    discovery_interval_hours=_get_discovery_interval_hours(12.0),
+    discovery_start_delay_hours=_get_discovery_start_delay_hours(0.0),
+    discovery_limit_per_keyword=_get_alias_int("DISCOVERY_LIMIT_PER_KEYWORD", "AUTO_DISCOVERY_LIMIT_PER_QUERY", 15),
+    discovery_keywords=_get_list("DISCOVERY_KEYWORDS", DEFAULT_DISCOVERY_KEYWORDS),
+    monitored_chat_ids=_get_int_list("MONITORED_CHAT_IDS"),
+    geo_only_kazakhstan=_get_bool("GEO_ONLY_KAZAKHSTAN", True),
+    geo_keywords=_get_list("GEO_KEYWORDS", DEFAULT_GEO_KEYWORDS),
+    database_path=DATA_DIR / "leadkz.sqlite3",
+    export_dir=DATA_DIR / "exports",
+    daily_report_enabled=_get_bool("DAILY_REPORT_ENABLED", True),
+    daily_report_hour=_get_int("DAILY_REPORT_HOUR", 21),
+    autobackup_enabled=_get_bool("AUTOBACKUP_ENABLED", True),
+    autobackup_hour=_get_int("AUTOBACKUP_HOUR", 23),
+    auto_discovery_enabled=_get_bool("AUTO_DISCOVERY_ENABLED", True),
+    auto_discovery_min_group_score=_get_int("AUTO_DISCOVERY_MIN_GROUP_SCORE", 75),
+    auto_discovery_history_limit=_get_alias_int("AUTO_DISCOVERY_HISTORY_LIMIT", "AUTO_DISCOVERY_ANALYZE_MESSAGES", 120),
+    auto_monitor_valid_groups=_get_bool("AUTO_MONITOR_VALID_GROUPS", True),
+    auto_hide_bad_groups=_get_bool("AUTO_HIDE_BAD_GROUPS", True),
+    scan_my_groups_on_start=_get_bool("SCAN_MY_GROUPS_ON_START", True),
+    scan_my_groups_interval_hours=_get_float("SCAN_MY_GROUPS_INTERVAL_HOURS", 6.0),
+    scan_my_groups_limit=_get_int("SCAN_MY_GROUPS_LIMIT", 250),
+    scan_my_groups_history_limit=_get_int("SCAN_MY_GROUPS_HISTORY_LIMIT", 80),
+    only_valid_groups=_get_bool("ONLY_VALID_GROUPS", True),
+    health_server_enabled=_get_bool("HEALTH_SERVER_ENABLED", True),
+    health_port=_get_int("PORT", 8080),
+    max_notifications_per_hour=_get_int("MAX_NOTIFICATIONS_PER_HOUR", 10),
+    weekly_report_enabled=_get_bool("WEEKLY_REPORT_ENABLED", True),
+    weekly_report_day=_get_int("WEEKLY_REPORT_DAY", 6),
+    cleanup_enabled=_get_bool("CLEANUP_ENABLED", True),
+    cleanup_hour=_get_int("CLEANUP_HOUR", 4),
+    web_dashboard_enabled=_get_bool("WEB_DASHBOARD_ENABLED", True),
+    brand_name=os.getenv("BRAND_NAME", "LeadKZ").strip() or "LeadKZ",
+    brand_phone=os.getenv("BRAND_PHONE", "").strip(),
+    brand_telegram=os.getenv("BRAND_TELEGRAM", "").strip(),
+)
