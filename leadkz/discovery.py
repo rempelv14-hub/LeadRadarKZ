@@ -296,6 +296,87 @@ async def discover_public_groups(
     return added_or_updated
 
 
+async def scan_existing_dialog_groups(
+    client: TelegramClient,
+    db: Database,
+    geo_keywords: Iterable[str] | None = None,
+    geo_required: bool = True,
+    history_limit: int = 80,
+    min_valid_score: int = 70,
+    max_groups: int = 250,
+    auto_hide_bad: bool = False,
+) -> int:
+    """Сканирует группы, где Telegram-аккаунт уже состоит, и добавляет валидные в мониторинг.
+
+    Это не использует contacts.SearchRequest, поэтому работает даже когда Telegram дал FloodWait
+    на поиск новых публичных групп.
+    """
+    geo_keywords = list(geo_keywords or [])
+    checked = 0
+    valid_count = 0
+    async for dialog in client.iter_dialogs():
+        if checked >= max_groups:
+            break
+        chat = dialog.entity
+        kind = None
+        username = getattr(chat, "username", None)
+        title = getattr(chat, "title", "Без названия") or "Без названия"
+
+        if isinstance(chat, types.Channel):
+            if not bool(getattr(chat, "megagroup", False)):
+                continue
+            kind = "megagroup"
+        elif isinstance(chat, types.Chat):
+            kind = "group"
+        else:
+            continue
+
+        chat_id = int(getattr(chat, "id", 0) or 0)
+        if chat_id <= 0 or db.is_group_blocked(chat_id):
+            continue
+
+        checked += 1
+        query = "my_dialogs"
+        base_geo_score, _ = geo_score_for_text(_group_text(chat, query), geo_keywords)
+        db.add_group_candidate(chat_id=chat_id, title=title, username=username, query=query, kind=kind, geo_score=base_geo_score)
+
+        try:
+            evaluation = await evaluate_public_group(
+                client, chat, query=query, geo_keywords=geo_keywords, history_limit=history_limit,
+                min_valid_score=min_valid_score, geo_required=geo_required,
+            )
+            validation, _suggested_status = _status_from_score(evaluation.score, min_valid_score, auto_hide_bad)
+            if evaluation.score >= min_valid_score:
+                status = "valid"
+                valid_count += 1
+            elif evaluation.score >= 50:
+                status = "candidate"
+            else:
+                status = "hidden" if auto_hide_bad else "candidate"
+            db.update_group_evaluation(
+                chat_id=chat_id,
+                score=evaluation.score,
+                validation_status=validation,
+                reasons=evaluation.reasons,
+                lead_hits=evaluation.lead_hits,
+                spam_hits=evaluation.spam_hits,
+                developer_hits=evaluation.developer_hits,
+                recent_messages=evaluation.recent_messages,
+                status=status,
+            )
+            log.info("Dialog group evaluated: %s score=%s status=%s", title, evaluation.score, status)
+        except FloodWaitError as exc:
+            log.warning("Flood wait while scanning existing dialog groups: %s seconds", exc.seconds)
+            return valid_count
+        except Exception as exc:
+            db.mark_group_error(chat_id, f"dialog evaluation error: {type(exc).__name__}: {exc}")
+            log.info("Dialog group evaluation failed for %s: %s", title, exc)
+        await asyncio.sleep(0.4)
+
+    log.info("Existing dialog groups scan finished: checked=%s valid=%s", checked, valid_count)
+    return valid_count
+
+
 async def discover_similar_groups(
     client: TelegramClient,
     db: Database,
