@@ -31,6 +31,23 @@ class Lead:
 
 
 @dataclass(frozen=True)
+class RejectedMessage:
+    chat_id: int
+    message_id: int
+    chat_title: str
+    chat_username: str | None
+    sender_id: int | None
+    sender_username: str | None
+    text: str
+    score: int
+    category: str
+    reasons: str
+    message_date: str
+    link: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
 class GroupCandidate:
     chat_id: int
     title: str
@@ -174,6 +191,26 @@ class Database:
                 PRIMARY KEY (chat_id, message_id)
             )
         """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS rejected_messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT,
+                sender_id INTEGER,
+                sender_username TEXT,
+                text TEXT NOT NULL,
+                score INTEGER NOT NULL DEFAULT 0,
+                category TEXT NOT NULL DEFAULT 'not_lead',
+                reasons TEXT NOT NULL DEFAULT '',
+                message_date TEXT NOT NULL,
+                link TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+        """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_rejected_created ON rejected_messages(created_at)")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_rejected_category ON rejected_messages(category)")
         self.conn.execute("""
             CREATE TABLE IF NOT EXISTS case_library (
                 key TEXT PRIMARY KEY,
@@ -598,6 +635,78 @@ class Database:
         """, (chat_id, message_id, vote, now))
         self.conn.commit()
 
+
+    def add_rejected_message(self, *, chat_id: int, message_id: int, chat_title: str, chat_username: str | None,
+                             sender_id: int | None, sender_username: str | None, text: str, score: int,
+                             category: str, reasons: Iterable[str], message_date: datetime, link: str | None) -> None:
+        """Сохраняет скрытые/отклонённые сообщения, чтобы можно было проверить фильтр."""
+        if not text or len(text.strip()) < 8:
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            self.conn.execute("""
+                INSERT INTO rejected_messages (
+                    chat_id, message_id, chat_title, chat_username, sender_id, sender_username,
+                    text, score, category, reasons, message_date, link, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                chat_id, message_id, chat_title, chat_username, sender_id, sender_username,
+                text[:2000], int(score), category, " | ".join(reasons),
+                message_date.astimezone(timezone.utc).isoformat(), link, now,
+            ))
+            self.conn.commit()
+        except sqlite3.IntegrityError:
+            return
+
+    def get_rejected_messages(self, limit: int = 12) -> list[RejectedMessage]:
+        rows = self.conn.execute("""
+            SELECT * FROM rejected_messages
+            ORDER BY message_date DESC, created_at DESC
+            LIMIT ?
+        """, (limit,)).fetchall()
+        return [self._row_to_rejected(row) for row in rows]
+
+    def delete_rejected_message(self, chat_id: int, message_id: int) -> None:
+        self.conn.execute("DELETE FROM rejected_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id))
+        self.conn.commit()
+
+    def restore_rejected_as_lead(self, chat_id: int, message_id: int, min_score: int = 55) -> bool:
+        row = self.conn.execute("SELECT * FROM rejected_messages WHERE chat_id = ? AND message_id = ?", (chat_id, message_id)).fetchone()
+        if not row:
+            return False
+        try:
+            msg_date = datetime.fromisoformat(str(row["message_date"]))
+        except Exception:
+            msg_date = datetime.now(timezone.utc)
+        inserted = self.add_lead(
+            chat_id=int(row["chat_id"]),
+            message_id=int(row["message_id"]),
+            chat_title=str(row["chat_title"]),
+            chat_username=row["chat_username"],
+            sender_id=row["sender_id"],
+            sender_username=row["sender_username"],
+            text=str(row["text"]),
+            score=max(int(row["score"] or 0), min_score),
+            category=str(row["category"] or "restored"),
+            geo_score=0,
+            reasons=[str(row["reasons"] or "вернул вручную как лид")],
+            message_date=msg_date,
+            link=row["link"],
+            lead_hash=None,
+        )
+        if inserted:
+            self.delete_rejected_message(chat_id, message_id)
+        return inserted
+
+    @staticmethod
+    def _row_to_rejected(row: sqlite3.Row) -> RejectedMessage:
+        return RejectedMessage(
+            chat_id=row["chat_id"], message_id=row["message_id"], chat_title=row["chat_title"],
+            chat_username=row["chat_username"], sender_id=row["sender_id"], sender_username=row["sender_username"],
+            text=row["text"], score=row["score"], category=row["category"], reasons=row["reasons"],
+            message_date=row["message_date"], link=row["link"], created_at=row["created_at"],
+        )
+
     def get_feedback_summary(self) -> dict[str, int]:
         rows = self.conn.execute("SELECT vote, COUNT(*) AS c FROM filter_feedback GROUP BY vote").fetchall()
         return {str(row["vote"]): int(row["c"]) for row in rows}
@@ -648,11 +757,20 @@ class Database:
 
     def get_priority_queue(self, limit: int = 15) -> list[Lead]:
         rows = self.conn.execute("""
-            SELECT * FROM leads
+            SELECT *,
+                CASE
+                    WHEN message_date >= datetime('now', '-1 hour') THEN 20
+                    WHEN message_date >= datetime('now', '-6 hours') THEN 10
+                    ELSE 0
+                END AS freshness_bonus
+            FROM leads
             WHERE status NOT IN ('hidden', 'archived', 'closed', 'lost')
             ORDER BY
                 CASE status WHEN 'new' THEN 0 WHEN 'favorite' THEN 1 WHEN 'talking' THEN 2 WHEN 'contacted' THEN 3 ELSE 4 END,
-                score DESC, geo_score DESC, message_date DESC
+                (score + freshness_bonus) DESC,
+                score DESC,
+                geo_score DESC,
+                message_date DESC
             LIMIT ?
         """, (limit,)).fetchall()
         return [self._row_to_lead(row) for row in rows]
@@ -772,6 +890,25 @@ class Database:
             "deleted_errors": int(deleted_errors),
             "deleted_notifications": int(deleted_notifications),
         }
+
+
+    def auto_disable_bad_groups(self, days: int = 7, min_group_score: int = 45) -> int:
+        """Скрывает слабые группы, которые не дают лидов и имеют низкий group_score."""
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = self.conn.execute("""
+            SELECT gc.chat_id, gc.group_score, COUNT(l.message_id) AS leads_count
+            FROM group_candidates gc
+            LEFT JOIN leads l ON l.chat_id = gc.chat_id AND l.message_date >= ?
+            WHERE gc.status IN ('candidate', 'valid', 'active')
+            GROUP BY gc.chat_id, gc.group_score
+            HAVING leads_count = 0 AND COALESCE(gc.group_score, 0) < ?
+            LIMIT 50
+        """, (since, int(min_group_score))).fetchall()
+        count = 0
+        for row in rows:
+            self.set_group_status(int(row["chat_id"]), "hidden")
+            count += 1
+        return count
 
     def get_top_words_from_feedback(self, vote: str, limit: int = 12) -> list[tuple[str, int]]:
         rows = self.conn.execute("""
