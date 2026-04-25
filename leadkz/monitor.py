@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 from zoneinfo import ZoneInfo
@@ -11,7 +12,7 @@ from telethon import TelegramClient, events, types
 from telethon.errors import FloodWaitError
 
 from .database import Database, Lead
-from .filters import detect_niche, geo_score_for_text, score_message
+from .filters import detect_niche, geo_score_for_text, normalize_text, score_message
 from .formatting import format_lead
 from .keyboards import lead_actions
 
@@ -75,14 +76,60 @@ async def save_and_notify_if_lead(*, db: Database, bot: Bot, admin_id: int, chat
     chat_title = getattr(chat, "title", "Без названия") or "Без названия"
     chat_username = getattr(chat, "username", None)
 
+    os.environ["EXACT_LEADS_MODE"] = "true" if db.get_setting_bool("exact_leads_mode", True) else "false"
+    os.environ["BUYER_ONLY_MODE"] = "true"
+    os.environ["REJECT_SELLERS"] = "true"
+    os.environ["REQUIRE_BUYER_INTENT"] = "true"
     result = score_message(text, min_score=effective_min_score, geo_keywords=geo_keywords, geo_required=False)
     delta, learned_reasons, learned_spam, learned_geo_hits = db.apply_learning_to_text(f"{text}\n{chat_title}\n@{chat_username or ''}")
+
+    msg_date_for_reject = getattr(message, "date", None)
+    if not isinstance(msg_date_for_reject, datetime):
+        msg_date_for_reject = datetime.now(timezone.utc)
+    if msg_date_for_reject.tzinfo is None:
+        msg_date_for_reject = msg_date_for_reject.replace(tzinfo=timezone.utc)
+
+    sender_for_reject = getattr(message, "sender", None)
+    sender_id_for_reject = getattr(message, "sender_id", None)
+    sender_username_for_reject = getattr(sender_for_reject, "username", None) if sender_for_reject else None
+    message_id_for_reject = int(getattr(message, "id", 0) or 0)
+    link_for_reject = make_message_link(chat, message_id_for_reject)
+
     if learned_spam:
+        db.add_rejected_message(
+            chat_id=chat_id, message_id=message_id_for_reject, chat_title=chat_title, chat_username=chat_username,
+            sender_id=sender_id_for_reject, sender_username=sender_username_for_reject, text=text, score=0,
+            category="learned_spam", reasons=["скрыто обученным спам-словом"],
+            message_date=msg_date_for_reject, link=link_for_reject,
+        )
         return None
     if not result.is_lead and delta < 20:
+        if db.get_setting_bool("save_hidden_messages", True):
+            db.add_rejected_message(
+                chat_id=chat_id, message_id=message_id_for_reject, chat_title=chat_title, chat_username=chat_username,
+                sender_id=sender_id_for_reject, sender_username=sender_username_for_reject, text=text, score=result.score,
+                category=result.category, reasons=result.reasons,
+                message_date=msg_date_for_reject, link=link_for_reject,
+            )
         return None
 
     niche = detect_niche(result.category, text)
+    if db.get_setting_bool("chatbot_only_mode", False):
+        cleaned_for_bot_mode = normalize_text(text + " " + result.category)
+        bot_related = niche == "bots" or (
+            niche == "automation" and any(x in cleaned_for_bot_mode for x in [
+                "заявк", "запис", "kaspi", "каспи", "рассыл", "уведомл", "telegram", "телеграм", "бот"
+            ])
+        )
+        if not bot_related:
+            if db.get_setting_bool("save_hidden_messages", True):
+                db.add_rejected_message(
+                    chat_id=chat_id, message_id=message_id_for_reject, chat_title=chat_title, chat_username=chat_username,
+                    sender_id=sender_id_for_reject, sender_username=sender_username_for_reject, text=text, score=result.score,
+                    category="not_chatbot_lead", reasons=["скрыто: включён режим «только чат-боты/автоматизация»"],
+                    message_date=msg_date_for_reject, link=link_for_reject,
+                )
+            return None
     if enabled_niches and niche not in enabled_niches:
         return None
 
