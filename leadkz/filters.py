@@ -167,6 +167,41 @@ NICHE_CONTEXT_KEYWORDS_STRICT = [
     "маркетолог", "маркетинг", "контент", "дизайн", "логотип", "баннер", "презентация",
 ]
 
+
+
+# Problem phrases сами по себе НЕ являются лидом, потому что их часто используют
+# исполнители в рекламных постах: "у вас теряются заявки — я помогу".
+# Поэтому боль клиента засчитывается только вместе с маркерами личной задачи.
+SELF_NEED_MARKERS = [
+    "у меня", "у нас", "мне", "нам", "моему бизнесу", "нашему бизнесу",
+    "для моего бизнеса", "для нашей компании", "в моем бизнесе", "в нашем бизнесе",
+    "для моей школы", "для нашей школы", "для моего курса", "для наших курсов",
+    "для салона", "для магазина", "для клиники", "для студии", "для компании",
+    "хочу", "хотим", "планирую", "планируем", "нужно нам", "нужна нам", "нужен нам",
+]
+
+PROBLEM_SELLER_CONTEXT_PHRASES = [
+    "если у вас", "если у вас теряются", "у вас теряются", "помогу", "поможем",
+    "решу проблему", "закрою эту боль", "автоматизирую", "настрою", "сделаю",
+    "оставляйте заявку", "пишите в лс", "пишите в личку", "записывайтесь",
+    "консультация бесплатно", "разберу ваш", "аудит бесплатно", "мой продукт",
+    "наш продукт", "моя услуга", "наша услуга", "мы помогаем", "я помогаю",
+]
+
+# Боли клиента: человек может не писать "нужен бот", но описывает проблему,
+# которую можно закрыть ботом/CRM/автоматизацией.
+PROBLEM_TO_BOT_PHRASES = [
+    "как принимать заявки", "принимать заявки", "заявки теряются", "теряются заявки",
+    "клиенты теряются", "теряются клиенты", "не успеваем отвечать", "не успеваю отвечать",
+    "много сообщений в директ", "много заявок в директ", "заявки из instagram", "заявки из инстаграм",
+    "нужна запись клиентов", "клиенты сами записывались", "онлайн запись клиентов",
+    "хочу автоматизировать запись", "как автоматизировать запись", "нужно вести учеников",
+    "выдавать уроки", "доступ к урокам", "оплата за курс", "оплата через kaspi",
+    "как подключить kaspi", "уведомления менеджеру", "база клиентов", "клиентская база",
+    "рассылка клиентам", "напоминания клиентам", "таблица заявок", "заявки в таблицу",
+    "воронка продаж", "автоматизировать продажи", "обработка заявок", "сбор заявок",
+]
+
 HOT_PHRASES = [
     "срочно", "сегодня", "завтра", "как можно быстрее", "кто свободен", "готов оплатить",
     "есть бюджет", "бюджет", "оплата", "нужно сейчас", "до вечера", "быстро", "горит",
@@ -356,7 +391,8 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
 
     seller_hits = _contains_any(cleaned, SELLER_INTENT_PHRASES)
     developer_hits = _contains_any(cleaned, DEVELOPER_PHRASES)
-    all_seller_hits = list(dict.fromkeys(seller_hits + developer_hits))
+    problem_seller_context_hits_for_reject = _contains_any(cleaned, PROBLEM_SELLER_CONTEXT_PHRASES)
+    all_seller_hits = list(dict.fromkeys(seller_hits + developer_hits + problem_seller_context_hits_for_reject))
 
     strict_buyer_hits = _contains_any(cleaned, STRICT_BUYER_INTENT_PHRASES)
     buyer_hits = _contains_any(cleaned, BUYER_PHRASES)
@@ -364,10 +400,16 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     solution_hits = _contains_any(cleaned, SOLUTION_CONTEXT_WORDS)
     strict_solution_hits = _contains_any(cleaned, NICHE_CONTEXT_KEYWORDS_STRICT)
     hot_hits = _contains_any(cleaned, HOT_PHRASES)
+    raw_problem_hits = _contains_any(cleaned, PROBLEM_TO_BOT_PHRASES)
+    self_need_hits = _contains_any(cleaned, SELF_NEED_MARKERS)
+    problem_seller_context_hits = _contains_any(cleaned, PROBLEM_SELLER_CONTEXT_PHRASES)
+    question_intent_for_problem = "?" in text or any(p in cleaned for p in ["как ", "кто ", "где ", "подскажите", "посоветуйте"])
+    # Боль засчитываем только если это похоже на личный запрос/вопрос, а не на рекламный пост исполнителя.
+    problem_hits = raw_problem_hits if raw_problem_hits and (self_need_hits or question_intent_for_problem) and not problem_seller_context_hits else []
 
     has_question_intent_early = any(re.search(p, cleaned) for p in QUESTION_PATTERNS)
-    has_strict_buyer_intent = bool(strict_buyer_hits or buyer_hits or has_question_intent_early)
-    has_strict_solution_context = bool(strict_solution_hits or solution_hits)
+    has_strict_buyer_intent = bool(strict_buyer_hits or buyer_hits or problem_hits or has_question_intent_early)
+    has_strict_solution_context = bool(strict_solution_hits or solution_hits or problem_hits)
 
     if buyer_only_mode and reject_sellers and all_seller_hits:
         return LeadScore(
@@ -379,7 +421,7 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     if buyer_only_mode and require_buyer_intent and not has_strict_buyer_intent:
         return LeadScore(
             False, 0, "no_buyer_intent", 0,
-            ["скрыто: нет явного намерения заказать/найти исполнителя"],
+            ["скрыто: нет явного намерения заказать/найти исполнителя. Боли типа «теряются заявки» считаются лидом только если человек пишет про свою задачу или задаёт вопрос."],
             lead_hash
         )
 
@@ -405,6 +447,9 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     if hot_hits:
         score += 15
         reasons.append(f"горячесть: {', '.join(hot_hits[:3])}")
+    if problem_hits:
+        score += 28 + min(len(problem_hits), 3) * 6
+        reasons.append(f"личная боль клиента → можно предложить бота/CRM: {', '.join(problem_hits[:3])}")
 
     for pattern in QUESTION_PATTERNS:
         if re.search(pattern, cleaned):
@@ -426,10 +471,10 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
         reasons.append("нет признаков гео Казахстана")
 
     has_question_intent = any(re.search(p, cleaned) for p in QUESTION_PATTERNS)
-    has_intent = bool(strict_buyer_hits or buyer_hits or has_question_intent)
+    has_intent = bool(strict_buyer_hits or buyer_hits or problem_hits or has_question_intent)
     if not buyer_only_mode:
         has_intent = bool(buyer_hits or buyer_word_hits or has_question_intent)
-    has_solution_context = bool(strict_solution_hits or solution_hits)
+    has_solution_context = bool(strict_solution_hits or solution_hits or problem_hits)
     has_geo = geo_score > 0 or not geo_required
     category = detect_business_category(cleaned)
     niche = detect_niche(category, cleaned)
