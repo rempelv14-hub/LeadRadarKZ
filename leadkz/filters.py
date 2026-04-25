@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 from dataclasses import dataclass
 from typing import Iterable, List
@@ -60,6 +61,110 @@ SPAM_PHRASES = [
     "инвестиции без риска", "подпишись", "розыгрыш", "розыгрываем", "дешевые подписчики",
     "накрутка", "18+", "эрот", "порно", "bet", "casino", "ставь плюс", "удаленная работа без опыта",
     "миллион за", "заработок в день", "кредит без", "микрозайм",
+]
+
+# ============================================================
+# Buyer Only Mode
+# Показываем только заказчиков, а не исполнителей.
+# Работает по всем нишам: боты, CRM, сайты, SMM, дизайн.
+# ============================================================
+
+STRICT_BUYER_INTENT_PHRASES = [
+    # Общий спрос / поиск исполнителя
+    "нужен", "нужна", "нужно", "нужны", "надо", "требуется",
+    "ищу разработчика", "ищу исполнителя", "ищу специалиста", "ищу человека", "ищу команду",
+    "нужен разработчик", "нужен исполнитель", "нужен специалист", "нужен человек", "нужна команда",
+    "кто сделает", "кто может сделать", "кто сможет сделать", "кто возьмется", "кто умеет",
+    "кто занимается", "есть кто", "есть специалист", "посоветуйте", "подскажите", "порекомендуйте",
+    "нужна помощь", "помогите найти", "хочу заказать", "заказать", "есть задача",
+    "сколько стоит", "какая цена", "кто свободен", "готов оплатить", "есть бюджет",
+
+    # Чат-боты
+    "нужен бот", "нужна бот", "нужен чат бот", "нужен чат-бот", "нужен телеграм бот",
+    "нужен telegram bot", "нужен бот в телеграм", "нужно сделать бота", "сделать бота",
+    "ищу разработчика бота", "кто делает ботов", "кто сделает бота", "бот для курсов",
+    "бот для школы", "бот для бизнеса", "бот для записи", "бот для заявок",
+    "бот с оплатой", "бот с kaspi", "бот для клиентов", "бот для рассылки",
+
+    # CRM / автоматизация
+    "нужна crm", "нужна црм", "нужно crm", "нужна автоматизация", "нужно автоматизировать",
+    "автоматизировать заявки", "автоматизация заявок", "нужно принимать заявки",
+    "нужна интеграция", "подключить kaspi", "нужна оплата", "оплата через kaspi",
+    "нужна рассылка", "нужны уведомления", "нужна база клиентов", "настроить воронку",
+
+    # Сайты
+    "нужен сайт", "нужно сделать сайт", "кто сделает сайт", "ищу веб разработчика",
+    "ищу web разработчика", "нужен лендинг", "нужно сделать лендинг", "нужен интернет магазин",
+    "сайт под бизнес", "сайт для бизнеса", "сделать лендинг", "создать сайт",
+
+    # SMM / реклама
+    "нужен smm", "нужен смм", "ищу smm", "ищу смм", "нужен таргетолог",
+    "ищу таргетолога", "нужно настроить рекламу", "настроить рекламу", "нужна реклама",
+    "нужен маркетолог", "ищу маркетолога", "вести instagram", "вести инстаграм",
+    "нужен контент", "нужен контент план", "нужна упаковка профиля",
+
+    # Дизайн
+    "нужен дизайн", "нужен дизайнер", "ищу дизайнера", "кто сделает дизайн",
+    "нужен логотип", "сделать логотип", "нужен баннер", "нужна презентация",
+    "нужен фирменный стиль", "дизайн для instagram", "дизайн для инстаграм",
+
+    # Қазақша
+    "керек", "бот керек", "чат бот керек", "телеграм бот керек", "сайт керек",
+    "дизайнер керек", "smm керек", "смм керек", "маман керек", "жасап береді",
+    "кім жасап береді", "кім істеп береді", "іздеймін", "көмек керек",
+]
+
+SELLER_INTENT_PHRASES = [
+    # Общая реклама услуг / исполнитель ищет клиентов
+    "ищу клиентов", "ищем клиентов", "нужны клиенты", "ищу заказы", "ищу заказ",
+    "беру заказы", "принимаю заказы", "набираю проекты", "ищу проекты", "ищу проект",
+    "свободен для проектов", "есть свободные места", "возьму в работу",
+    "мои услуги", "предлагаю услуги", "оказываю услуги", "услуги для бизнеса",
+    "пишите в лс", "пишите в личку", "обращайтесь", "прайс", "портфолио",
+    "кейсы", "отзывы клиентов", "скидка", "акция", "консультация бесплатно",
+    "кому нужен", "кому нужна", "кому нужно", "кому нужны",
+    "помогу сделать", "помогаю сделать", "поможем сделать", "готов сделать",
+    "готова сделать", "готовы сделать", "сделаю для вас", "сделаем для вас",
+    "закажите у нас", "заказать у меня",
+
+    # Боты
+    "делаю ботов", "создаю ботов", "разрабатываю ботов", "разработка ботов",
+    "чат-боты под ключ", "чат боты под ключ", "боты под ключ",
+    "telegram боты под ключ", "телеграм боты под ключ", "создание ботов",
+    "разработка чат-ботов", "продаю бота", "готовый бот", "готовые боты",
+
+    # CRM / автоматизация
+    "настраиваю crm", "настраиваем crm", "внедряю crm", "внедрение crm",
+    "автоматизирую бизнес", "автоматизация бизнеса под ключ", "настраиваю amo",
+    "настраиваю битрикс", "интеграции под ключ",
+
+    # Сайты
+    "делаю сайты", "создаю сайты", "разрабатываю сайты", "разработка сайтов",
+    "создание сайтов", "сайты под ключ", "лендинги под ключ", "делаю лендинги",
+    "web разработчик", "веб разработчик", "сайт за", "лендинг за",
+
+    # SMM / реклама
+    "настраиваю рекламу", "таргетолог", "smm услуги", "смм услуги",
+    "веду smm", "веду смм", "продвижение instagram", "продвижение инстаграм",
+    "помогу с рекламой", "настройка таргета", "запуск рекламы",
+
+    # Дизайн
+    "делаю дизайн", "создаю дизайн", "дизайнер", "делаю логотипы",
+    "создаю логотипы", "дизайн под ключ", "баннеры на заказ",
+
+    # Қазақша seller
+    "клиент іздеймін", "тапсырыс аламын", "бот жасап беремін", "сайт жасап беремін",
+    "дизайн жасап беремін", "қызмет көрсетемін",
+]
+
+# Нишевой контекст. Одного контекста мало — нужен ещё buyer intent.
+NICHE_CONTEXT_KEYWORDS_STRICT = [
+    "бот", "бота", "боты", "чатбот", "чат-бот", "чат бот", "telegram", "телеграм", "tg",
+    "mini app", "мини app", "мини приложение", "crm", "црм", "автоматизация", "автоматизац",
+    "заявки", "заявка", "запись", "онлайн запись", "рассылка", "уведомления", "оплата",
+    "kaspi", "каспи", "интеграция", "воронка", "клиентская база", "сайт", "лендинг",
+    "landing", "интернет-магазин", "web", "веб", "smm", "смм", "таргет", "реклама",
+    "маркетолог", "маркетинг", "контент", "дизайн", "логотип", "баннер", "презентация",
 ]
 
 HOT_PHRASES = [
@@ -245,18 +350,51 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
     if spam_hits:
         return LeadScore(False, 0, "spam", 0, [f"спам-слова: {', '.join(spam_hits[:3])}"], lead_hash)
 
-    developer_hits = _contains_any(cleaned, DEVELOPER_PHRASES)
-    if developer_hits:
-        score -= 65
-        reasons.append(f"похоже на разработчика: {', '.join(developer_hits[:3])}")
+    buyer_only_mode = os.getenv("BUYER_ONLY_MODE", "true").lower() in {"1", "true", "yes", "on"}
+    reject_sellers = os.getenv("REJECT_SELLERS", "true").lower() in {"1", "true", "yes", "on"}
+    require_buyer_intent = os.getenv("REQUIRE_BUYER_INTENT", "true").lower() in {"1", "true", "yes", "on"}
 
+    seller_hits = _contains_any(cleaned, SELLER_INTENT_PHRASES)
+    developer_hits = _contains_any(cleaned, DEVELOPER_PHRASES)
+    all_seller_hits = list(dict.fromkeys(seller_hits + developer_hits))
+
+    strict_buyer_hits = _contains_any(cleaned, STRICT_BUYER_INTENT_PHRASES)
     buyer_hits = _contains_any(cleaned, BUYER_PHRASES)
     buyer_word_hits = _contains_any(cleaned, BUYER_WORDS)
     solution_hits = _contains_any(cleaned, SOLUTION_CONTEXT_WORDS)
+    strict_solution_hits = _contains_any(cleaned, NICHE_CONTEXT_KEYWORDS_STRICT)
     hot_hits = _contains_any(cleaned, HOT_PHRASES)
 
+    has_question_intent_early = any(re.search(p, cleaned) for p in QUESTION_PATTERNS)
+    has_strict_buyer_intent = bool(strict_buyer_hits or buyer_hits or has_question_intent_early)
+    has_strict_solution_context = bool(strict_solution_hits or solution_hits)
+
+    if buyer_only_mode and reject_sellers and all_seller_hits:
+        return LeadScore(
+            False, 0, "seller_rejected", 0,
+            [f"скрыто: это похоже на исполнителя/рекламу услуг: {', '.join(all_seller_hits[:4])}"],
+            lead_hash
+        )
+
+    if buyer_only_mode and require_buyer_intent and not has_strict_buyer_intent:
+        return LeadScore(
+            False, 0, "no_buyer_intent", 0,
+            ["скрыто: нет явного намерения заказать/найти исполнителя"],
+            lead_hash
+        )
+
+    if buyer_only_mode and not has_strict_solution_context:
+        return LeadScore(
+            False, 0, "no_niche_context", 0,
+            ["скрыто: нет контекста нужной услуги/ниши"],
+            lead_hash
+        )
+
+    if strict_buyer_hits:
+        score += 35 + min(len(strict_buyer_hits), 4) * 8
+        reasons.append(f"намерение заказчика: {', '.join(strict_buyer_hits[:4])}")
     if buyer_hits:
-        score += 45 + min(len(buyer_hits), 3) * 10
+        score += 35 + min(len(buyer_hits), 3) * 8
         reasons.append(f"фразы заказчика: {', '.join(buyer_hits[:3])}")
     if buyer_word_hits:
         score += min(len(set(buyer_word_hits)), 5) * 5
@@ -288,15 +426,17 @@ def score_message(text: str, min_score: int = 55, geo_keywords: Iterable[str] | 
         reasons.append("нет признаков гео Казахстана")
 
     has_question_intent = any(re.search(p, cleaned) for p in QUESTION_PATTERNS)
-    has_intent = bool(buyer_hits or buyer_word_hits or has_question_intent)
-    has_solution_context = bool(solution_hits)
+    has_intent = bool(strict_buyer_hits or buyer_hits or has_question_intent)
+    if not buyer_only_mode:
+        has_intent = bool(buyer_hits or buyer_word_hits or has_question_intent)
+    has_solution_context = bool(strict_solution_hits or solution_hits)
     has_geo = geo_score > 0 or not geo_required
     category = detect_business_category(cleaned)
     niche = detect_niche(category, cleaned)
-    is_lead = score >= min_score and has_intent and has_solution_context and has_geo and not developer_hits
+    is_lead = score >= min_score and has_intent and has_solution_context and has_geo and not all_seller_hits
 
-    if developer_hits:
-        category = "developer"
+    if all_seller_hits:
+        category = "seller_rejected"
     elif spam_hits:
         category = "spam"
     elif not is_lead:
