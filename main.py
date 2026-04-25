@@ -102,10 +102,17 @@ def current_geo_required() -> bool:
 async def ensure_admin(message_or_query) -> bool:
     user = getattr(message_or_query, "from_user", None)
     if not user or user.id not in set(settings.admin_ids):
+        user_id = getattr(user, "id", "unknown")
+        text = (
+            "⛔ Доступ запрещён.\n\n"
+            f"Твой Telegram ID: <code>{user_id}</code>\n"
+            "Если это ты владелец, вставь этот ID в Railway Variables → ADMIN_ID, "
+            "нажми Apply changes и Deploy."
+        )
         if isinstance(message_or_query, Message):
-            await message_or_query.answer("Доступ запрещён.")
+            await message_or_query.answer(text)
         elif isinstance(message_or_query, CallbackQuery):
-            await message_or_query.answer("Доступ запрещён", show_alert=True)
+            await message_or_query.answer("Доступ запрещён. Проверь ADMIN_ID.", show_alert=True)
         return False
     return True
 
@@ -116,7 +123,7 @@ async def cmd_start(message: Message) -> None:
         return
     init_runtime_defaults()
     await message.answer(
-        "🤖 <b>LeadKZ Free v8 Easy Start + Railway</b>\n\n"
+        "🤖 <b>LeadKZ Free v8.1.1 Easy Start + Railway</b>\n\n"
         "Бесплатно ищу свежие заявки по Казахстану: чат-боты, CRM, автоматизация, сайты, SMM и дизайн.\n"
         "Внутри: KZ-гео, скоринг, бюджет, риск ответа, CRM, обучение фильтра, очередь приоритетов, воронка, учет денег, кейсы, PDF-КП, заметки, напоминания, бэкап и экспорт.\n\n"
         "Авторассылки и авто-вступления нет — это сделано специально для безопасности аккаунта.",
@@ -128,7 +135,7 @@ async def cmd_start(message: Message) -> None:
 async def cb_menu(query: CallbackQuery) -> None:
     if not await ensure_admin(query):
         return
-    await query.message.edit_text("🤖 <b>LeadKZ Free v8 Easy Start + Railway</b>\n\nВыбери действие:", reply_markup=main_menu())
+    await query.message.edit_text("🤖 <b>LeadKZ Free v8.1.1 Easy Start + Railway</b>\n\nВыбери действие:", reply_markup=main_menu())
     await query.answer()
 
 
@@ -985,7 +992,12 @@ async def start_telethon() -> None:
 async def main() -> None:
     init_runtime_defaults()
     await start_telethon()
-    await bot.send_message(settings.admin_id, "✅ LeadKZ Free v8 запущен. Нажми /start для меню.")
+    try:
+        await bot.send_message(settings.admin_id, "✅ LeadKZ Free v8.1.1 запущен. Нажми /start для меню.")
+    except Exception as exc:
+        # Важно: Railway не должен падать, если ADMIN_ID неверный или пользователь ещё не нажал /start.
+        db.log_error("startup_notify", f"{type(exc).__name__}: {exc}")
+        log.warning("Startup notification was not delivered. Check ADMIN_ID and press /start in the bot. Error: %s", exc)
     if settings.health_server_enabled:
         asyncio.create_task(start_health_server())
     asyncio.create_task(periodic_scan())
